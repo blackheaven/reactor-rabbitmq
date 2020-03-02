@@ -30,10 +30,12 @@ public class ChannelPoolOptions {
 
     private Integer maxCacheSize;
 
+    private Integer poolSize;
+
     private Scheduler subscriptionScheduler;
 
     /**
-     * Set the maximum size of the pool.
+     * Set the maximum size of the pool see {@link LazyChannelPool}.
      * <p>
      * Default is 5 channels.
      *
@@ -48,6 +50,24 @@ public class ChannelPoolOptions {
     @Nullable
     public Integer getMaxCacheSize() {
         return maxCacheSize;
+    }
+
+    /**
+     * Set the size of the pool see {@link BoundedChannelPool}.
+     * <p>
+     * Default is 5 channels.
+     *
+     * @param poolSize
+     * @return this {@link ChannelPoolOptions} instance
+     */
+    public ChannelPoolOptions poolSize(int poolSize) {
+        this.poolSize = poolSize;
+        return this;
+    }
+
+    @Nullable
+    public Integer getPoolSize() {
+        return poolSize;
     }
 
     /**

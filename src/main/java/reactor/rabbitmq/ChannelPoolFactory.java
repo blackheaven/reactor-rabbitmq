@@ -37,4 +37,12 @@ public class ChannelPoolFactory {
         return new LazyChannelPool(connectionMono, channelPoolOptions);
     }
 
+    public static ChannelPool createBoundedChannelPool(Mono<? extends Connection> connectionMono) {
+        return createBoundedChannelPool(connectionMono, new ChannelPoolOptions());
+    }
+
+    public static ChannelPool createBoundedChannelPool(Mono<? extends Connection> connectionMono, ChannelPoolOptions channelPoolOptions) {
+        return new BoundedChannelPool(connectionMono, channelPoolOptions);
+    }
+
 }

@@ -1,0 +1,211 @@
+/*
+ * Copyright (c) 2019 Pivotal Software Inc, All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package reactor.rabbitmq;
+
+import com.rabbitmq.client.AMQP;
+import com.rabbitmq.client.Channel;
+import com.rabbitmq.client.Connection;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
+import reactor.test.StepVerifier;
+import reactor.test.scheduler.VirtualTimeScheduler;
+
+import java.io.IOException;
+import java.time.Duration;
+
+import static java.time.Duration.ofSeconds;
+import static org.mockito.Mockito.*;
+
+class BoundedChannelPoolTests {
+
+    BoundedChannelPool boundedChannelPool;
+
+    Connection connection;
+    Channel channel1, channel2, channel3;
+
+    @BeforeEach
+    void setUp() throws IOException {
+        connection = mock(Connection.class);
+        when(connection.isOpen()).thenReturn(true);
+        channel1 = channel(1);
+        channel2 = channel(2);
+        channel3 = channel(3);
+        when(connection.createChannel()).thenReturn(channel1, channel2, channel3);
+    }
+
+    @Test
+    void testChannelPoolLazyInitialization() throws Exception {
+        int maxChannelPoolSize = 2;
+        ChannelPoolOptions channelPoolOptions = new ChannelPoolOptions()
+                .poolSize(maxChannelPoolSize)
+                .subscriptionScheduler(VirtualTimeScheduler.create());
+        boundedChannelPool = new BoundedChannelPool(Mono.just(connection), channelPoolOptions);
+
+        StepVerifier.withVirtualTime(() ->
+                Mono.when(
+                        // 1#
+                        useChannelFromStartUntil(ofSeconds(1)),
+                        // 2#
+                        useChannelBetween(ofSeconds(2), ofSeconds(3))
+                ))
+                .expectSubscription()
+                .thenAwait(ofSeconds(3))
+                .verifyComplete();
+
+        // Expectations, numbers on the left mean elapsed time in seconds
+        // 0 -> 1# creates channel1
+        // 1 -> 1# releases channel1, 1# adds channel1 to pool
+        // 2 -> 2# obtains channel1 from pool
+        // 3 -> 2# releases channel1, 2# adds channel1 to pool
+
+        verifyBasicPublish(channel1, 2);
+        verifyBasicPublishNever(channel2);
+        verify(channel1, never()).close();
+
+        boundedChannelPool.close();
+
+        verify(channel1).close();
+        verify(channel2, never()).close();
+        verify(channel1, never()).clearConfirmListeners();
+        verify(channel2, never()).clearConfirmListeners();
+    }
+
+    @Test
+    void testChannelPoolNeverExceedsMaxPoolSize() throws Exception {
+        int maxChannelPoolSize = 2;
+        ChannelPoolOptions channelPoolOptions = new ChannelPoolOptions()
+                .poolSize(maxChannelPoolSize)
+                .subscriptionScheduler(VirtualTimeScheduler.create());
+        boundedChannelPool = new BoundedChannelPool(Mono.just(connection), channelPoolOptions);
+
+        StepVerifier.withVirtualTime(() ->
+                Mono.when(
+                        // 1#
+                        useChannelBetween(ofSeconds(1), ofSeconds(4)),
+                        // 2#
+                        useChannelBetween(ofSeconds(2), ofSeconds(5)),
+                        // 3#
+                        useChannelBetween(ofSeconds(3), ofSeconds(6))
+                ))
+                .expectSubscription()
+                .thenAwait(ofSeconds(6))
+                .verifyComplete();
+
+        // Expectations, numbers on the left mean elapsed time in seconds
+        // 1 -> 1# creates channel1
+        // 2 -> 2# creates channel2
+        // 3 -> 3# waits for a channel
+        // 4 -> 1# releases channel1, 1# adds channel1 to pool
+        // 5 -> 2# releases channel2, 2# adds channel2 to pool
+        // 6 -> 3# releases a channel
+
+        verifyBasicPublish(channel1, 2);
+        verifyBasicPublish(channel2, 1);
+        verifyBasicPublish(channel3, 0);
+        verify(channel1, never()).close();
+        verify(channel2, never()).close();
+        verify(channel3, never()).close();
+
+        boundedChannelPool.close();
+
+        verify(channel1).close();
+        verify(channel2).close();
+    }
+
+    @Test
+    void testChannelPool() throws Exception {
+        int maxChannelPoolSize = 1;
+        ChannelPoolOptions channelPoolOptions = new ChannelPoolOptions()
+                .poolSize(maxChannelPoolSize)
+                .subscriptionScheduler(VirtualTimeScheduler.create());
+        boundedChannelPool = new BoundedChannelPool(Mono.just(connection), channelPoolOptions);
+
+        StepVerifier.withVirtualTime(() ->
+                Mono.when(
+                        // 1#
+                        useChannelFromStartUntil(ofSeconds(3)),
+                        // 2#
+                        useChannelBetween(ofSeconds(1), ofSeconds(2)),
+                        // 3#
+                        useChannelBetween(ofSeconds(4), ofSeconds(5))
+                ))
+                .expectSubscription()
+                .thenAwait(ofSeconds(5))
+                .verifyComplete();
+        // Expectations, numbers on the left mean elapsed time in seconds
+        // 0 -> 1# creates channel1
+        // 1 -> 2# creates channel2
+        // 2 -> 2# releases channel2, 2# adds channel2 to pool
+        // 3 -> 1# releases channel1, 1# closes channel1 (pool is full)
+        // 4 -> 3# obtains channel2 from pool
+        // 5 -> 3# releases channel2, 2# adds channel2 to pool
+
+        verifyBasicPublish(channel1, 2);
+        verifyBasicPublish(channel2, 0);
+        verify(channel1).close();
+        verify(channel2, never()).close();
+        verify(channel1, never()).clearConfirmListeners();
+        verify(channel2).clearConfirmListeners();
+
+        boundedChannelPool.close();
+        verify(channel2).close();
+    }
+
+    private Mono<Void> useChannelFromStartUntil(Duration until) {
+        return useChannelBetween(Duration.ZERO, until);
+    }
+
+    private Mono<Void> useChannelBetween(Duration from, Duration to) {
+        return Mono.delay(from)
+                .then(boundedChannelPool.getChannelMono())
+                .flatMap(channel ->
+                        Mono.just(1)
+                                .doOnNext(i -> {
+                                        System.out.println("useChannelBetween2 to " + to);
+                                    try {
+                                        channel.basicPublish("", "", null, "".getBytes());
+                                    } catch (IOException e) {
+                                        e.printStackTrace();
+                                    }
+                                })
+                                .delayElement(to.minus(from))
+                                .doFinally(signalType -> boundedChannelPool.getChannelCloseHandler().accept(signalType, channel))
+                )
+                .then();
+    }
+
+    private void verifyBasicPublishNever(Channel channel) throws Exception {
+        verifyBasicPublish(channel, 0);
+    }
+
+    private void verifyBasicPublishOnce(Channel channel) throws Exception {
+        verifyBasicPublish(channel, 1);
+    }
+
+    private void verifyBasicPublish(Channel channel, int times) throws Exception {
+        verify(channel, times(times)).basicPublish(anyString(), anyString(), nullable(AMQP.BasicProperties.class), any(byte[].class));
+    }
+
+    private Channel channel(int channelNumber) {
+        Channel channel = mock(Channel.class);
+        when(channel.getChannelNumber()).thenReturn(channelNumber);
+        when(channel.isOpen()).thenReturn(true);
+        when(channel.getConnection()).thenReturn(connection);
+        return channel;
+    }
+}

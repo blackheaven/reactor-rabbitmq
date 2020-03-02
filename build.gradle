@@ -104,6 +104,7 @@ configure(allprojects) { project ->
 	dependencies {
 		compile "io.projectreactor:reactor-core:$reactorCoreVersion"
 		compile "com.rabbitmq:amqp-client:$rabbitMqJavaClientVersion"
+		compile "io.projectreactor.addons:reactor-pool:0.1.1.RELEASE"
 
 		// Testing
 		// JUnit Jupiter API and TestEngine implementation
